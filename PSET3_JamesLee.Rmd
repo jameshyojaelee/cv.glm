@@ -1,0 +1,268 @@
+---
+title: "POLI175_PSET3"
+author: "James Lee"
+date: "1/30/2021"
+output: html_document
+---
+
+## Q1: Limited Logistic Regression and LOOCV
+
+#### 1) To begin this question, run the following code, which will store the document term matrix (predictor variables) and the vector of labels (outcome variable) separately
+```{r}
+load("CreditClaim.RData")
+x <- credit_claim$x
+y <- credit_claim$y
+
+#dataframe version of x
+xdf <- as.data.frame(x)
+
+mean(y)
+```
+> 25.85% of the documents are credit claiming
+
+
+#### 2) Note the number of observations vs. the number of predictors. What would happen if you tried to use this dataset to fit a logistic regression with all of the predictors?
+
+> there are 797 observations with 7587 predictors. It will take a very long time to create and run a regression model. Also, most of those predictors may not be as significant as the others. 
+
+#### 3) Identify the twenty words that are the most prevalent (occur most often) across the documents. Print those twenty words and comment briefly: what do you notice about the words?
+```{r}
+total <- colSums(x)
+top20_names <- names(sort(total,decreasing=TRUE)[1:20])
+top20_names
+```
+> Most of these words are directly related to politics or government budgets. 
+
+
+#### 4) Using the full set of observations, fit a logistic regression that predicts the credit-claiming label (y) with the 20 most common words (only the columns of x corresponding to those 20 words).
+```{r}
+top20_var <- paste(top20_names, collapse = "+")
+mod1 <- glm(paste("y ~ ", top20_var, sep=""), family = binomial(link = "logit"), data = xdf)
+summary(mod1)
+```
+
+
+#### Bonus) You will notice that one of the variables has been dropped from the regression (i.e. you will see NA instead of a coefficient value). Why do you think this is the case?
+> According to the summary (Coefficients: (1 not defined because of singularities)), the "dateline" column is perfectly identical to the another predictor
+When I ran xdf["dateline"] == xdf["byline"], it showed that those two columns are identical. Identical columns will skew the regression if not eliminated and in this case, the glm function automatically eliminated "dateline" 
+
+
+#### 5) Using the predicted probabilities from the logistic regression and applying a threshold of 0.5, classify each document in the data as credit claiming or not.
+```{r}
+ldat <- data.frame(outcome = y,
+                   predprob = predict(mod1, type = "response"))
+ldat$class <- as.numeric(ldat$predprob > 0.5)
+```
+
+
+#### 6) Compute the in-sample accuracy, precision, and recall
+```{r}
+table(ldat$class)
+#in-sample accuracy = 0.8205772
+mean(ldat$class == ldat$outcome)
+
+#precision TP/ (TP + FP) = 0.7787611
+nrow(subset(ldat, class == 1 & outcome == 1)) / nrow(subset(ldat, class == 1))
+
+#recall TP / (TP + FN) = 0.4271845
+nrow(subset(ldat, class == 1 & outcome == 1)) / (nrow(subset(ldat, class == 1 & outcome == 1)) + nrow(subset(ldat, class == 0 & outcome == 1)))
+
+```
+
+
+#### Note) Now we are going to compare the in-sample fit to an estimate of out-of-sample fit. To do this, instead of performing a single training-test split, we’re going to use leave one out cross validation (LOOCV). You may find it easier to implement this process by column-binding y and the limited x matrix (just the 20 variables) into a single matrix and then converting it into a data.frame.
+
+```{r}
+ind <- match(top20_names, names(xdf))
+xdf2 <- xdf[, ind]
+xdf2$y <- y
+```
+
+#### 7) For each of the documents, perform the following procedure, again using a logistic regression with the 20 most common words as the predictors:
+#### a) For document i (each observation or row of the data), fit the logistic regression to all documents except for i (we leave this document out of the model).
+#### b) Make a prediction for document i using the logistic regression you just fit, specifically classifying it as credit claiming or not, employing a 0.5 threshold.
+
+
+```{r echo=TRUE, warning=FALSE}
+n <- nrow(xdf2)
+
+top20_var <- paste(top20_names, collapse = " + ")
+
+xdf2$predprob <- NA
+xdf2$class <- NA
+
+for (i in 1:n){
+  train.dat <- xdf2[-i,]
+  cv.mod <- glm(paste("y ~ ", top20_var, sep=""), 
+                family = binomial(link = "logit"), 
+                data = train.dat)
+  xdf2[i,]$predprob <- predict(cv.mod, newdata = xdf2[i,], type = "response")
+  xdf2[i,]$class <- as.numeric(xdf2[i,]$predprob > 0.5)
+  rm(train.dat,cv.mod)
+}
+
+mean((xdf2$y - xdf2$predprob)^2)
+```
+
+
+#### 8) Compute the out-of-sample accuracy, precision, and recall based on this crossvalidation procedure.
+```{r}
+#accuracy = 0.8117942
+mean(xdf2$class == xdf2$y)
+
+#precision TP/ (TP + FP) = 0.745614
+nrow(subset(xdf2, class == 1 & y == 1)) / nrow(subset(xdf2, class == 1))
+
+#recall TP / (TP + FN) = 0.4126214
+nrow(subset(xdf2, class == 1 & y == 1)) / (nrow(subset(xdf2, class == 1 & y == 1)) + nrow(subset(xdf2, class == 0 & y == 1)))
+
+```
+#### 9) How does the accuracy, precision, and recall from the in-sample fit (Part 6) compare to the accuracy, precision, and recall for this estimated out-of-sample fit?
+>They are very similar but the out-of-sample accuracy, precision, and recall are slightly lower than those of in-sample. This is normal because in-sample fits better than out-of-sample. 
+
+
+
+## Q2: LASSO and k-Fold Cross-Validation
+
+#### 1) First, separate the data into training and test sets using the following code: 
+```{r}
+load("CreditClaim.RData")
+x <- credit_claim$x
+y <- credit_claim$y
+n.total <- length(y)
+prop.train <- 0.7
+set.seed(54321)
+r <- sample(1:n.total,round(prop.train*n.total), replace = FALSE)
+x.train <- x[r,]
+x.test <- x[-r,]
+y.train <- y[r]
+y.test <- y[-r]
+```
+
+
+#### 2) Now run the following chunk of code:
+```{r}
+library(glmnet)
+set.seed(123)
+cv.results <- cv.glmnet(x = x.train, y = y.train, 
+                        family = "binomial", nfolds = 5, alpha = 1)
+```
+#### Explain what this code chunk is doing. That is, explain what the function cv.glmnet is performing, what data are being used, what the response variable is, and how many predictors are being employed. Further explain what the family = "binomial", nfolds = 5, and alpha = 1 arguments are all doing.
+
+>Using the training that we've created in Q1, we are applying cross-validation of 5 folds on those data sets (x.train and y.train). y.train is the response variable. Also, since we want to use classification model, "family" needs to be set to "binomial". Alpha is set to 1 to specify the penalty (in this case, lasso penalty). 
+
+#### 3) Determine how many λ values were tested. Given the number of folds and number of λ values used, how many separate LASSO models did the cv.glmnet command above fit? In addition, what loss function is being employed to compute CV error by default in this case?
+```{r}
+length(cv.results$lambda)
+```
+>100 lambda values were tested. Since we did 5-fold, there were 500 Lasso Models used. binomial deviance was used for CV error computation by default. 
+
+#### 4) Without using the short-cut command plot(cv.results), plot the cross-validation error on the y-axis against the log(λ) value on the x-axis.
+```{r}
+library(ggplot2)
+
+ggplot(data = NULL ,aes(x= cv.results$lambda, y= cv.results$cvm), log="x") + 
+  geom_point(color="red") +
+  geom_errorbar(data = NULL, aes(x=cv.results$lambda, ymin=cv.results$cvlo, ymax=cv.results$cvup), color='grey') +
+  labs(title="Log(λ) vs CV Error", 
+       y="CV Error (binomial deviance)", 
+       x="Log(λ)")
+
+```
+
+
+#### 5) What is the optimal λ value according to this cross-validation procedure (i.e. the value resulting in the lowest CV error)?
+
+```{r}
+opt.lambda <- cv.results$lambda.min
+opt.lambda
+```
+#### 6) Extract the optimal λ value and store it. Now, using the optimal λ value, use the glmnet function to fit a single LASSO model on the training data. How many coefficients remain in this model (i.e. how many coefficients were not shrunk to zero)? Hint: Use the ?predict.glmnet command to view the documentation on the various tasks the predict function can perform with a glmnet object.
+
+```{r}
+lasso.opt <- glmnet(x = x.train, y = y.train, alpha = 1, family = "binomial", 
+                      lambda = opt.lambda)
+
+length(lasso.opt$beta)
+length(lasso.opt[lasso.opt$beta[, 1] != 0])
+```
+> 88 coefficients out of 7587 were not shrunk to zero
+
+
+#### Bonus) Print the names of the coefficients that remain in the model
+```{r}
+beta <- lasso.opt$beta
+beta_names <- c()
+
+for (j in 1:88){
+  beta_names[j] <- beta@Dimnames[[1]][beta@i[j]]
+}
+
+beta_names
+```
+
+
+
+#### 7) Use the LASSO model you fit in part (6) to make predictions for the test data. Apply this LASSO model to the test data to compute predicted probabilities for all observations in the test data. Convert these predicted probabilities into classification labels using 0.5 as the threshold. Compute the test set classification accuracy, precision, and recall.
+
+```{r}
+testpred <- as.vector(predict(lasso.opt, newx = x.test, s = opt.lambda, type = "response"))
+summary(testpred)
+
+testclass <- testpred
+testclass[testclass > 0.5] <- 1
+testclass[testclass < 0.5] <- 0
+
+testdf <- data.frame(outcome = y.test, predprob = testpred ,class = testclass)
+
+#in-sample accuracy = 0.7824268
+mean(testdf$class == testdf$outcome)
+
+#precision TP/ (TP + FP) = 0.7058824
+nrow(subset(testdf, class == 1 & outcome == 1)) / nrow(subset(testdf, class == 1))
+
+#recall TP / (TP + FN) = 0.3636364
+nrow(subset(testdf, class == 1 & outcome == 1)) / (nrow(subset(testdf, class == 1 & outcome == 1)) + nrow(subset(testdf, class == 0 & outcome == 1)))
+```
+
+
+
+#### 8) Apply the bootstrap to the LASSO in order to compute a 95% confidence interval on the predicted probability that the first row of the test data is creditclaiming. Only the training data should be used in training the bootstrapped LASSO models, and hold λ fixed at the lambda.1se value for this procedure (i.e. not the lambda.min value that you used above).
+#### Note: This process is a bit computationally intensive, so you can keep the number of bootstrap iterations to a few hundred. (When testing out and debugging the function on your own, I recommend further limiting the number of iterations.) If you were implementing this for a real project, however, you would want to increase the number of iterations to the thousands.
+
+```{r warning=FALSE}
+library(dplyr)
+B = 1000
+
+mult_boot <- rep(NA,B)
+newdata1 <- c(1, 0.5, 0.5, 1)
+set.seed(1234)
+
+train_df <- data.frame(x.train, y=y.train)
+
+for (i in 1:B){
+  sample_df <- train_df[sample(nrow(train_df), size=55, replace=TRUE), ]
+  m1 <- as.matrix(sample_df[ , -which(names(sample_df) %in% c("y"))])
+  m2 <- as.matrix(sample_df$y)
+  temp <- glmnet(x = m1, y = m2, alpha = 1, family = "binomial", 
+                      lambda = cv.results$lambda.1se)
+  mult_boot[i] <- predict(temp, newx = x.test[1, , drop=FALSE], s = cv.results$lambda.1se, type = "response")
+}
+
+#95% confidence interval
+quantile(mult_boot, probs = c(0.025,0.975))
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
